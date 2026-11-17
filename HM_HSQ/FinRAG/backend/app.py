@@ -1,8 +1,7 @@
-﻿"""FastAPI adapter for the document RAG engine."""
+"""FastAPI adapter for the document RAG engine."""
 import json
 import logging
 import os
-import re
 import threading
 import uuid
 import hashlib

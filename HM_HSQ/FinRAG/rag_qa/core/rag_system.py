@@ -1,4 +1,3 @@
-﻿from base import Config
 from .prompts import RAGPrompts
 
 class RAGSystem:
