@@ -1,0 +1,23 @@
+{
+  "finance": {
+    "id": "finance",
+    "name": "金融知识库",
+    "domain": "金融",
+    "instructions": "",
+    "documents": [
+      {
+        "id": "8cd2e99db7305916fa4447b669723f98324424046288b8f0d04a1521d0c97245",
+        "name": "金融.pdf",
+        "chunks": 184,
+        "size": 539524
+      }
+    ]
+  },
+  "legal": {
+    "id": "legal",
+    "name": "法律知识库",
+    "domain": "法律",
+    "instructions": "引用资料原文条款。",
+    "documents": []
+  }
+}
