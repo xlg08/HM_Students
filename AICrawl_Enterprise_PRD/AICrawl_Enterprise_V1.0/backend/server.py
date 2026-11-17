@@ -147,7 +147,9 @@ def handler(service):
                 if parts[:2] != ['api', 'v1']:
                     raise Problem('接口不存在', 404)
                 p = parts[2:]
-                if p == ['sources']:
+                if p == ['web-tests']:
+                    result = service.web_test(data)
+                elif p == ['sources']:
                     result = service.create_source(data)
                 elif p == ['jobs']:
                     result = service.create_job(data)

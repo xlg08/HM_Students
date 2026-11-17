@@ -23,7 +23,7 @@ class NoRedirect(HTTPRedirectHandler):
 def parse_metadata(document):
     info = document.get("info")
     if not isinstance(info, dict) or not isinstance(info.get("name"), str) or not info.get("version"):
-        raise ValueError("PyPI ?????????????")
+        raise ValueError('PyPI 返回缺少项目名称或版本')
     files = document.get("urls", [])
     dates = [f.get("upload_time_iso_8601", "") for f in files if isinstance(f, dict)]
     return dict(title=info["name"] + " " + str(info["version"]), package=info["name"],
@@ -37,7 +37,7 @@ def parse_metadata(document):
 def fetch_metadata(connector):
     global _last_request
     if connector not in CATALOG:
-        raise ValueError("??????????")
+        raise ValueError('连接器不在允许列表')
     # A fixed HTTPS host and path; redirects/proxies disabled and TLS certificates verified.
     url = "https://pypi.org/pypi/" + CATALOG[connector] + "/json"
     with _lock:
@@ -47,14 +47,14 @@ def fetch_metadata(connector):
     try:
         with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=8) as response:
             if response.headers.get_content_type() != "application/json":
-                raise ValueError("????? JSON")
+                raise ValueError('远端未返回 JSON')
             raw = response.read(2_000_001)
             if len(raw) > 2_000_000:
-                raise ValueError("???? 2MB ??")
+                raise ValueError('响应超过 2MB 限制')
             document = json.loads(raw)
     except HTTPError as exc:
-        raise ValueError(f"PyPI HTTP {exc.code}??????????") from exc
+        raise ValueError(f'PyPI HTTP {exc.code}，停止自动重试') from exc
     except URLError as exc:
-        raise ValueError("PyPI ?????????????????") from exc
+        raise ValueError('PyPI 网络失败，请检查网络及证书') from exc
     return parse_metadata(document), dict(uri=url, pointer="/info", raw=document["info"],
         response_sha256=hashlib.sha256(raw).hexdigest(), http_status=200, extractor_version="pypi-json-v1")

@@ -8,9 +8,11 @@ import uuid
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 from .config import Settings
 from .connectors import CATALOG, fetch_metadata
 from .tools import tool_catalog
+from .web_fetch import normalize_url, fetch_page, FetchBlocked
 from .observability import request_id
 
 
@@ -50,7 +52,7 @@ class Service:
         for connector, package in CATALOG.items():
             sid = uid()
             self.sources[sid] = dict(id=sid, name='PyPI / ' + package, kind='packages', status='DRAFT', created_at=now(), mode='PUBLIC_API', connector=connector, policy_url='https://docs.pypi.org/api/json/')
-        self.log('SYSTEM_START', 'prototype', '内存模式启动，使用本地样本，不访问外网')
+        self.log('SYSTEM_START', 'prototype', '内存模式；支持离线样本、公开 API 与单页 HTTPS 测试')
 
     def log(self, action, target, detail=''):
         self.audit.insert(0, dict(id=uid(), at=now(), action=action, target=target, detail=detail, actor='本地演示管理员', request_id=request_id.get()))
@@ -101,19 +103,35 @@ class Service:
         name = self.name(data)
         kind = data.get('kind')
         connector = data.get('connector', '')
+        web_url = normalize_url(data['url']) if kind == 'pages' else None
         if connector:
             if not isinstance(connector, str) or connector not in CATALOG:
-                raise Problem('???????')
+                raise Problem('不支持此连接器')
             kind = 'packages'
-        if not isinstance(kind, str) or kind not in (*SAMPLES, 'packages') or (kind == 'packages' and not connector):
+        if not isinstance(kind, str) or kind not in (*SAMPLES, 'packages', 'pages') or (kind == 'packages' and not connector):
             raise Problem('请选择支持的样本类型')
         with self.lock:
             if len(self.sources) >= self.settings.max_history:
                 raise Problem('数据源数量达到本机演示容量上限', 409)
             sid = uid()
-            self.sources[sid] = dict(id=sid, name=name, kind=kind, status='DRAFT', created_at=now(), mode='PUBLIC_API' if connector else 'LOCAL_FIXTURE', connector=connector)
+            self.sources[sid] = dict(id=sid, name=name, kind=kind, status='DRAFT', created_at=now(), mode='WEB_PAGE' if web_url else ('PUBLIC_API' if connector else 'LOCAL_FIXTURE'), connector=connector, url=web_url)
             self.log('SOURCE_CREATE', sid, name)
             return self.sources[sid]
+
+    def web_test(self, data):
+        url = normalize_url(data.get('url'))
+        note = data.get('note', '')
+        if data.get('authorized') is not True or not isinstance(note, str) or not note.strip():
+            raise Problem('请确认访问权限并填写测试用途')
+        with self.lock:
+            # Reuse a source for the same URL; a new task/run is created per test.
+            source = next((s for s in self.sources.values() if s.get('url') == url), None)
+            if source is None:
+                source = self.create_source(dict(name='网页 / ' + urlsplit(url).hostname[:60], kind='pages', url=url))
+            if source['status'] == 'DRAFT':
+                self.source_action(source['id'], 'approve', {'note': note})
+            job = self.create_job(dict(name='单页测试 / ' + urlsplit(url).hostname[:60], source_id=source['id']))
+            return self.start(job['id'])
 
     @staticmethod
     def name(data):
@@ -128,13 +146,13 @@ class Service:
             transitions = {'approve': ('DRAFT', 'ACTIVE'), 'suspend': ('ACTIVE', 'SUSPENDED'), 'resume': ('SUSPENDED', 'ACTIVE')}
             if action not in transitions or source['status'] != transitions[action][0]:
                 raise Problem('当前数据源状态不支持此操作', 409)
-            if source['mode'] == 'PUBLIC_API' and action == 'approve':
+            if source['mode'] != 'LOCAL_FIXTURE' and action == 'approve':
                 note = (data or {}).get('note', '')
                 if not isinstance(note, str) or not note.strip():
-                    raise Problem('?????? API ??????????')
+                    raise Problem('请填写公开 API 使用目的与准入依据')
                 source['approval_note'] = note[:500]
             source['status'] = transitions[action][1]
-            self.log('SOURCE_' + action.upper(), sid, '仅本地样本审批，不代表真实网站授权')
+            self.log('SOURCE_' + action.upper(), sid, '本机准入审批，不代表企业法务或源站授予额外权限')
             return source
 
     def create_job(self, data):
@@ -207,15 +225,15 @@ class Service:
         token = request_id.set(run['request_id'])
         try:
             source_snapshot = copy.deepcopy(self.sources[run['source_id']])
-            real = source_snapshot['mode'] == 'PUBLIC_API'
+            real = source_snapshot['mode'] != 'LOCAL_FIXTURE'
             fetched = None
             for progress, message in [(10, '校验来源许可：本地样本通过'), (30, '读取本地原始 JSON 样本'), (55, '规则提取与字段证据定位'), (80, '必填字段与业务规则校验'), (100, '发布合格记录，异常记录进入复核')]:
                 if real and progress == 30:
                     if not self.checkpoint(run):
                         return
-                    fetched = fetch_metadata(source_snapshot['connector'])
+                    fetched = fetch_page(source_snapshot['url']) if source_snapshot['mode'] == 'WEB_PAGE' else fetch_metadata(source_snapshot['connector'])
                 if real:
-                    message = {10: '?? API ??????', 30: '??? PyPI ????', 55: '????????????', 80: '???????????', 100: '????????'}[progress]
+                    message = {10: '公开 API 来源准入校验', 30: '已获取真实来源响应', 55: '提取字段及原始证据', 80: '字段规则校验', 100: '提交真实采集结果'}[progress]
                 if self.stopping.wait(self.settings.stage_delay):
                     return
                 while self.checkpoint(run):
@@ -260,14 +278,14 @@ class Service:
             logging.getLogger('aicrawl').exception('capture_failed')
             with self.lock:
                 if run['status'] != 'CANCELLED':
-                    run.update(status='FAILED', error=str(exc), finished_at=now())
+                    run.update(status='BLOCKED' if isinstance(exc, FetchBlocked) else 'FAILED', error=str(exc), finished_at=now())
                     self.log('RUN_FAILED', rid, str(exc))
         finally:
             request_id.reset(token)
 
     @staticmethod
     def validate(kind, payload):
-        required = {'jobs': ['title', 'company', 'location'], 'products': ['title', 'sku', 'currency'], 'notices': ['title', 'publisher', 'published_at'], 'packages': ['title', 'package', 'version', 'source_url']}[kind]
+        required = {'jobs': ['title', 'company', 'location'], 'products': ['title', 'sku', 'currency'], 'notices': ['title', 'publisher', 'published_at'], 'packages': ['title', 'package', 'version', 'source_url'], 'pages': ['title', 'source_url', 'text']}[kind]
         issues = ['缺少必填字段：' + k for k in required if not payload.get(k)]
         if kind == 'products' and (not isinstance(payload.get('price'), (int, float)) or payload['price'] <= 0):
             issues.append('价格必须大于 0')
