@@ -1,0 +1,19 @@
+目前 FinRAG 是前后端分离项目，需要启动三部分。
+
+在项目目录执行，启动 Milvus 和后端。
+
+```powershell
+docker start finrag-milvus
+.\run_api.ps1
+```
+
+再打开一个终端，启动前端。
+
+```powershell
+cd frontend
+npm run dev
+```
+
+随后访问 [知识平台](http://127.0.0.1:5173)。
+
+当前这些服务已经运行，可以直接打开页面使用。
