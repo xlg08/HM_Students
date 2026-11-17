@@ -23,7 +23,7 @@ DATA.mkdir(parents=True, exist_ok=True)
 REGISTRY = DATA / 'knowledge_bases.json'
 lock = threading.Lock()
 systems = {}
-shared_models = None
+shared_models = {}
 logger = logging.getLogger(__name__)
 
 
@@ -47,15 +47,15 @@ def find_base(base_id):
 
 
 def get_system(base_id):
-    global shared_models
     entry = find_base(base_id)
     if base_id not in systems:
         from rag_qa.core.vector_store import VectorStore
         config = Config(knowledge_base=base_id)
         config.DOMAIN = entry['domain']
-        config.INSTRUCTIONS = entry['instructions']
-        store = VectorStore(config, shared_models=shared_models)
-        shared_models = (store.embedding_function, store.reranker)
+        config.INSTRUCTIONS = entry['instructions'] or config.INSTRUCTIONS
+        model_key = (config.M3_MODEL_PATH, config.RERANK_MODEL_PATH)
+        store = VectorStore(config, shared_models=shared_models.get(model_key))
+        shared_models[model_key] = (store.embedding_function, store.reranker)
         systems[base_id] = IntegratedQASystem(config, vector_store=store)
     return systems[base_id]
 
@@ -90,7 +90,7 @@ class ChatRequest(BaseModel):
 
 @app.get('/api/health')
 def health():
-    return {'status': 'ok', 'model_loaded': shared_models is not None}
+    return {'status': 'ok', 'model_loaded': bool(shared_models)}
 
 
 @app.get('/api/knowledge-bases')
@@ -144,15 +144,19 @@ def upload_document(base_id: str, file: UploadFile = File(...)):
                 raise HTTPException(400, '文件为空')
             path = directory / (digest.hexdigest() + suffix)
             temporary.replace(path)
-            chunks = get_system(base_id).ingest(path)
+            system = get_system(base_id)
+            logical_source = system.vector_store.resolve_document_source(name, str(directory / name))
+            chunks = system.ingest(path, source=logical_source, document_name=name)
             registry = read_registry()
-            record = {'id': digest.hexdigest(), 'name': name, 'size': size, 'chunks': chunks}
+            record = {'id': hashlib.sha256(name.encode()).hexdigest(), 'name': name, 'size': size, 'chunks': chunks, 'source': logical_source}
             documents = registry[base_id]['documents']
-            registry[base_id]['documents'] = [doc for doc in documents if doc['id'] != record['id']] + [record]
+            registry[base_id]['documents'] = [doc for doc in documents if doc['name'] != name] + [record]
             save_registry(registry)
             return record
         except HTTPException:
             raise
+        except (ValueError, FileNotFoundError) as error:
+            raise HTTPException(422, str(error))
         except Exception:
             logger.exception('Document ingestion failed')
             raise HTTPException(500, '文档入库失败，请检查后端日志并重试')
@@ -195,3 +199,44 @@ def clear_session(base_id: str, session_id: uuid.UUID):
         if base_id in systems:
             systems[base_id].clear_session_history(str(session_id))
     return {'success': True}
+
+
+class QueryRequest(BaseModel):
+    collection: str = Field(pattern=r'^[A-Za-z0-9_-]{1,64}$')
+    question: str = Field(min_length=1, max_length=4000)
+    top_k: int | None = Field(default=None, ge=1, le=100)
+
+
+@app.post('/api/v1/rag/query')
+def query_result(body: QueryRequest):
+    with lock:
+        find_base(body.collection)
+        try:
+            return get_system(body.collection).rag_system.answer(body.question, body.top_k)
+        except ValueError as error:
+            raise HTTPException(422, str(error))
+        except Exception:
+            logger.exception('Query failed')
+            raise HTTPException(502, 'Model or retrieval service failed; check backend logs')
+
+
+@app.post('/api/v1/documents/ingest', status_code=201)
+def ingest_uploaded(collection: str, file: UploadFile = File(...)):
+    record = upload_document(collection, file)
+    return {'success': True, 'collection': collection, 'document_id': record['id'], 'chunk_count': record['chunks']}
+
+
+@app.delete('/api/knowledge-bases/{base_id}/documents/{document_id}')
+def delete_document(base_id: str, document_id: str):
+    with lock:
+        registry = read_registry()
+        entry = find_base(base_id)
+        record = next((doc for doc in entry['documents'] if doc['id'] == document_id), None)
+        if record is None:
+            raise HTTPException(404, 'Document not found')
+        if 'source' not in record:
+            raise HTTPException(409, 'Legacy document requires source-path deletion through CLI')
+        count = get_system(base_id).vector_store.delete_document(record['source'])
+        registry[base_id]['documents'] = [doc for doc in entry['documents'] if doc['id'] != document_id]
+        save_registry(registry)
+        return {'success': True, 'removed_chunks': count}

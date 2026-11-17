@@ -1,17 +1,31 @@
 """Local document loading and parent-child chunking."""
 import hashlib
+import re
+import warnings
 from pathlib import Path
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-SUPPORTED_EXTENSIONS = {'.pdf', '.txt', '.md', '.docx', '.pptx', '.png', '.jpg', '.jpeg'}
+SUPPORTED_EXTENSIONS = {'.pdf', '.txt', '.md', '.docx', '.pptx', '.png', '.jpg', '.jpeg', '.doc', '.xlsx', '.xlsm', '.xls', '.csv', '.tsv', '.xmind', '.mm', '.opml'}
 
 def load_file(path):
     path = Path(path).resolve()
     suffix = path.suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
         raise ValueError(f'Unsupported document type: {path}')
-    if suffix == '.pdf':
+    locations = None
+    if suffix in {'.xlsx', '.xlsm', '.xls'}:
+        from .file_parsers import office_pages
+        parsed = office_pages(path)
+        pages, locations = zip(*parsed) if parsed else ([], [])
+    elif suffix in {'.xmind', '.mm', '.opml'}:
+        from .file_parsers import mind_pages
+        parsed = mind_pages(path)
+        pages, locations = zip(*parsed) if parsed else ([], [])
+    elif suffix == '.doc':
+        from .file_parsers import legacy_word
+        pages = [legacy_word(path)]
+    elif suffix == '.pdf':
         try:
             import pymupdf as fitz
         except ImportError:
@@ -32,13 +46,25 @@ def load_file(path):
     elif suffix == '.pptx':
         from pptx import Presentation
         pages = ['\n'.join(shape.text for shape in slide.shapes if shape.has_text_frame) for slide in Presentation(path).slides]
-    elif suffix in {'.png', '.jpg', '.jpeg'}:
+    elif suffix in {'.png', '.jpg', '.jpeg', '.doc', '.xlsx', '.xlsm', '.xls', '.csv', '.tsv', '.xmind', '.mm', '.opml'}:
         from rapidocr_onnxruntime import RapidOCR
         result, _ = RapidOCR()(str(path))
         pages = ['\n'.join(line[1] for line in result or [])]
     else:
-        pages = [path.read_text(encoding='utf-8-sig')]
-    documents = [Document(page_content=text, metadata={'source': str(path), 'page': index + 1}) for index, text in enumerate(pages) if text.strip()]
+        try:
+            text = path.read_text(encoding='utf-8-sig')
+        except UnicodeDecodeError:
+            text = path.read_text(encoding='gb18030')
+        pages = [text]
+    content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    documents = []
+    for index, text in enumerate(pages):
+        text = re.sub(r'[ \t]+', ' ', text.replace('\x00', '').replace('\r\n', '\n')).strip()
+        if text:
+            documents.append(Document(page_content=text, metadata={'source': str(path), 'document': path.name,
+                'page': index + 1, 'location': locations[index] if locations else str(index + 1),
+                'document_id': hashlib.sha256(str(path).encode()).hexdigest(),
+                'content_hash': content_hash}))
     if not documents:
         raise ValueError(f'No text extracted: {path}')
     return documents
@@ -47,6 +73,8 @@ def process_documents(path, parent_chunk_size=1200, child_chunk_size=300, chunk_
     path = Path(path).resolve()
     if not path.exists():
         raise FileNotFoundError(path)
+    if not 0 <= chunk_overlap < child_chunk_size <= parent_chunk_size:
+        raise ValueError('Require 0 <= overlap < child <= parent')
     files = sorted(p for p in path.rglob('*') if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS) if path.is_dir() else [path]
     if not files:
         raise ValueError(f'No supported documents: {path}')
@@ -59,5 +87,7 @@ def process_documents(path, parent_chunk_size=1200, child_chunk_size=300, chunk_
             for index, parent in enumerate(parents.split_documents([doc])):
                 identity = f"{file}:{doc.metadata['page']}:{index}:{parent.page_content}"
                 parent.metadata.update(parent_id=hashlib.sha256(identity.encode()).hexdigest(), parent_content=parent.page_content)
-                chunks.extend(children.split_documents([parent]))
+                for child_index, child in enumerate(children.split_documents([parent])):
+                    child.metadata['chunk_id'] = hashlib.sha256(f"{identity}:{child_index}:{child.page_content}".encode()).hexdigest()
+                    chunks.append(child)
     return chunks

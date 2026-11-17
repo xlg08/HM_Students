@@ -1,5 +1,6 @@
 """Generic RAG command-line and application entry point."""
 import argparse
+from pathlib import Path
 from base import Config
 from rag_qa.core.rag_system import RAGSystem
 
@@ -24,9 +25,16 @@ class IntegratedQASystem:
                     if chunk.choices and chunk.choices[0].delta.content:
                         yield chunk.choices[0].delta.content
 
-    def ingest(self, path):
+    def ingest(self, path, source=None, document_name=None):
         from rag_qa.core.document_processor import process_documents
         docs = process_documents(path, self.config.PARENT_CHUNK_SIZE, self.config.CHILD_CHUNK_SIZE, self.config.CHUNK_OVERLAP)
+        if source:
+            import hashlib
+            for doc in docs:
+                doc.metadata['source'] = source
+                doc.metadata['document'] = document_name or Path(source).name
+                doc.metadata['document_id'] = hashlib.sha256(source.encode()).hexdigest()
+                doc.metadata['chunk_id'] = hashlib.sha256((source + doc.metadata['chunk_id']).encode()).hexdigest()
         self.vector_store.add_documents(docs)
         return len(docs)
 
@@ -53,22 +61,27 @@ class IntegratedQASystem:
 def main():
     parser = argparse.ArgumentParser(description='通用文档 RAG')
     parser.add_argument('--config', default=None)
-    parser.add_argument('--knowledge-base', default=None)
+    parser.add_argument('--knowledge-base', '--collection', default=None)
     parser.add_argument('--domain', default=None)
     commands = parser.add_subparsers(dest='command', required=True)
     ingest = commands.add_parser('ingest', help='导入文件或目录')
     ingest.add_argument('path')
     ask = commands.add_parser('ask', help='单次问答')
     ask.add_argument('question')
+    delete = commands.add_parser('delete-document', help='??????????')
+    delete.add_argument('source')
     commands.add_parser('chat', help='交互问答，exit 退出')
     args = parser.parse_args()
     config = Config(args.config, args.knowledge_base)
     if args.domain:
         config.DOMAIN = args.domain
-    system = IntegratedQASystem(config)
+    from rag_qa.core.vector_store import VectorStore
+    system = IntegratedQASystem(config, vector_store=VectorStore(config, create=args.command == 'ingest'))
     try:
         if args.command == 'ingest':
             print(f'已导入 {system.ingest(args.path)} 个文档块')
+        elif args.command == 'delete-document':
+            print(system.vector_store.delete_document(str(Path(args.source).resolve())))
         elif args.command == 'ask':
             for token, _ in system.query(args.question):
                 print(token, end='', flush=True)

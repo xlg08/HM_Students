@@ -10,6 +10,19 @@
         "name": "金融.pdf",
         "chunks": 184,
         "size": 539524
+      },
+      {
+        "id": "293d0b2103d2be98be2d4dea99994d156dfe01346a881f165bffbd576bed3777",
+        "name": "金融02.pdf",
+        "size": 674244,
+        "chunks": 370
+      },
+      {
+        "id": "32f0eb6e06c04cdc394b0e8f2adc58928739aaa499004376aacc7344d649491a",
+        "name": "金融03.doc",
+        "size": 139776,
+        "chunks": 42,
+        "source": "F:\\传智档案阁\\就业档案阁\\学员就业记录\\昌平AI\\昌平AI-32期\\韩思琦\\工作项目代码_通用知识库智能体\\FinRAG\\HM_Students\\HM_HSQ\\FinRAG\\.runtime\\web\\uploads\\finance\\金融03.doc"
       }
     ]
   },
